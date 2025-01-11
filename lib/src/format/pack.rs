@@ -509,10 +509,51 @@ where O: ByteOrderExt + 'static
                 ..Default::default()
             }
             .write(w, |w| {
-                ChunkDescriptor::<O> { id: K_CHUNK_ADIR, unk: U32::new(1), ..Default::default() }
-                    .write(w, |w| {
+                let total_size = (std::mem::size_of::<u32>() + asset_directory.as_slice().as_bytes().len()) as u64;
+                let chunk = ChunkDescriptor::<O> { 
+                    id: K_CHUNK_ADIR, 
+                    unk: U32::new(1),
+                    size: U64::new(total_size), // Важно указать правильный размер!
+                    ..Default::default() 
+                };
+
+                log::info!("ADIR: Размер чанка в дескрипторе: {}", chunk.size.get());
+                log::info!("ADIR: ID чанка: {:?}", chunk.id);
+
+                chunk.write(w, |w| {
                     adir_pos = w.stream_position()?;
-                    w.write_all(asset_directory.as_slice().as_bytes())?;
+                    let count = asset_directory.len() as u32;
+    
+                    log::info!("ADIR: Начальная позиция: {}", adir_pos);
+                    log::info!("ADIR: Количество записей (u32): {} (hex: {:08X})", count, count);
+    
+                    // Записываем количество записей (4 байта)
+                    let count_bytes = count.to_le_bytes();
+                    log::info!("ADIR: Байты количества записей: {:02X} {:02X} {:02X} {:02X}", 
+                    count_bytes[0], count_bytes[1], count_bytes[2], count_bytes[3]);
+    
+                    w.write_all(&count_bytes)?;
+                    let pos_after_count = w.stream_position()?;
+                    log::info!("ADIR: Позиция после записи количества: {}", pos_after_count);
+    
+                    // Записываем сами записи
+                    let entries_bytes = asset_directory.as_slice().as_bytes();
+                    log::info!("ADIR: Размер данных записей: {} байт", entries_bytes.len());
+                    if entries_bytes.len() >= 16 {
+                        log::info!("ADIR: Первые 16 байт записей: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}", 
+                        entries_bytes[0], entries_bytes[1], entries_bytes[2], entries_bytes[3],
+                        entries_bytes[4], entries_bytes[5], entries_bytes[6], entries_bytes[7],
+                        entries_bytes[8], entries_bytes[9], entries_bytes[10], entries_bytes[11],
+                        entries_bytes[12], entries_bytes[13], entries_bytes[14], entries_bytes[15]);
+                    }
+    
+                    w.write_all(entries_bytes)?;
+    
+                    let end_pos = w.stream_position()?;
+                    log::info!("ADIR: Конечная позиция: {}", end_pos);
+                    log::info!("ADIR: Всего записано {} байт", end_pos - adir_pos);
+                    log::info!("ADIR: Размер записей {} байт", end_pos - pos_after_count);
+    
                     Ok(())
                 })?;
                 ChunkDescriptor::<O> { id: K_CHUNK_META, unk: U32::new(1), ..Default::default() }
@@ -553,6 +594,7 @@ where O: ByteOrderExt + 'static
         // Write updated ADIR offsets
         let pos = w.stream_position()?;
         w.seek(SeekFrom::Start(adir_pos))?;
+        w.write_type(&(asset_directory.len() as u32), Endian::Little)?;
         w.write_all(asset_directory.as_slice().as_bytes())?;
         w.seek(SeekFrom::Start(pos))?;
 

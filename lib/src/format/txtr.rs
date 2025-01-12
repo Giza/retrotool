@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Write;
+
 use std::{
     cmp::max,
     fmt::{Display, Formatter},
@@ -526,19 +529,86 @@ impl ETextureFormat {
     }
 }
 
+/// Функция выполняет "распутывание" (deswizzling) текстурных данных.
+/// Swizzling - это метод оптимизации доступа к текстурам в GPU, где пиксели 
+/// переупорядочиваются для лучшей производительности кэша.
 fn deswizzle(header: &STextureHeader, data: &[u8]) -> Result<Vec<u8>> {
+    // Получаем размеры блока (ширину, высоту, глубину) для данного формата текстуры
     let (bw, bh, bd) = header.format.block_size();
+    
+    // Создаем структуру BlockDim, описывающую размеры блока текстуры
+    // NonZeroUsize гарантирует, что размеры не будут нулевыми
     let block_dim = BlockDim {
         width: NonZeroUsize::new(bw as usize).unwrap(),
         height: NonZeroUsize::new(bh as usize).unwrap(),
         depth: NonZeroUsize::new(bd as usize).unwrap(),
     };
+    
+    // Получаем количество байт на пиксель для данного формата
     let bpp = header.format.bytes_per_pixel() as usize;
+    
+    // Определяем глубину и количество слоев текстуры
+    // Для 3D текстур глубина равна количеству слоев, для других типов - глубина равна 1
     let (depth, layers) = if header.kind == ETextureType::D3 {
         (header.layers as usize, 1)
     } else {
         (1, header.layers as usize)
     };
+    
+    // Вычисляем ожидаемый размер данных текстуры
+    let expected_size = tegra_swizzle::surface::swizzled_surface_size(
+        header.width as usize,
+        header.height as usize,
+        depth,
+        block_dim,
+        None,
+        bpp,
+        header.mip_sizes.len(), // количество уровней мипмаппинга
+        layers,
+    );
+    
+    // Проверяем, что размер входных данных соответствует ожидаемому
+    ensure!(data.len() == expected_size);
+    
+    // Выполняем распутывание данных с помощью библиотеки tegra_swizzle
+    // Преобразуем "запутанные" данные текстуры обратно в линейный формат
+    Ok(tegra_swizzle::surface::deswizzle_surface(
+        header.width as usize,
+        header.height as usize,
+        depth,
+        data,
+        block_dim,
+        None,
+        bpp,
+        header.mip_sizes.len(),
+        layers,
+    )?)
+}
+
+/// Функция выполняет "запутывание" (swizzling) текстурных данных.
+/// Преобразует линейные данные текстуры в формат, оптимизированный для GPU.
+pub fn swizzle(header: &STextureHeader, data: &[u8]) -> Result<Vec<u8>> {
+    // Получаем размеры блока (ширину, высоту, глубину) для данного формата текстуры
+    let (bw, bh, bd) = header.format.block_size();
+    
+    // Создаем структуру BlockDim, описывающую размеры блока текстуры
+    let block_dim = BlockDim {
+        width: NonZeroUsize::new(bw as usize).unwrap(),
+        height: NonZeroUsize::new(bh as usize).unwrap(),
+        depth: NonZeroUsize::new(bd as usize).unwrap(),
+    };
+    
+    // Получаем количество байт на пиксель для данного формата
+    let bpp = header.format.bytes_per_pixel() as usize;
+    
+    // Определяем глубину и количество слоев текстуры
+    let (depth, layers) = if header.kind == ETextureType::D3 {
+        (header.layers as usize, 1)
+    } else {
+        (1, header.layers as usize)
+    };
+    
+    // Вычисляем ожидаемый размер данных текстуры
     let expected_size = tegra_swizzle::surface::swizzled_surface_size(
         header.width as usize,
         header.height as usize,
@@ -549,8 +619,12 @@ fn deswizzle(header: &STextureHeader, data: &[u8]) -> Result<Vec<u8>> {
         header.mip_sizes.len(),
         layers,
     );
+    
+    // Проверяем, что размер входных данных соответствует ожидаемому
     ensure!(data.len() == expected_size);
-    Ok(tegra_swizzle::surface::deswizzle_surface(
+    
+    // Выполняем запутывание данных с помощью библиотеки tegra_swizzle
+    Ok(tegra_swizzle::surface::swizzle_surface(
         header.width as usize,
         header.height as usize,
         depth,
@@ -580,6 +654,7 @@ impl<O: ByteOrder> TextureData<O> {
         let (head_desc, head_data, _) = ChunkDescriptor::<O>::slice(txtr_data)?;
         ensure!(head_desc.id == K_CHUNK_HEAD);
         let head: STextureHeader = Cursor::new(head_data).read_type(Endian::Little)?;
+        //log::info!("META: {meta:#?}");
 
         // log::debug!("META: {meta:#?}");
         // log::debug!("HEAD: {head:#?}");
@@ -602,7 +677,89 @@ impl<O: ByteOrder> TextureData<O> {
                     [info.dest_offset as usize..(info.dest_offset + info.dest_size) as usize],
             )?;
         }
-        let deswizzled = deswizzle(&head, &buffer)?;
+        //let deswizzled = deswizzle(&head, &buffer)?;
+
+        let deswizzled = {
+            log::info!("До deswizzle (первые 256 байт):");
+            for (i, chunk) in buffer.iter().take(256).collect::<Vec<_>>().chunks(16).enumerate() {
+                log::info!("{:03X}: {:02X?}", i * 16, chunk);
+            }
+            
+            // Сохраняем исходные данные в файл
+            let mut file = File::create("before_deswizzle.bin")?;
+            file.write_all(&buffer)?;
+
+            let result = deswizzle(&head, &buffer)?;
+            
+            log::info!("После deswizzle (первые 256 байт):");
+            for (i, chunk) in result.iter().take(256).collect::<Vec<_>>().chunks(16).enumerate() {
+                log::info!("{:03X}: {:02X?}", i * 16, chunk);
+            }
+            // Добавляем информацию о параметрах текстуры
+            log::info!("Параметры текстуры:");
+            log::info!("Ширина: {}", head.width);
+            log::info!("Высота: {}", head.height);
+            log::info!("Слои: {}", head.layers);
+            log::info!("Тип: {:?}", head.kind);
+            log::info!("Формат: {:?}", head.format);
+            log::info!("Байт на пиксель: {}", head.format.bytes_per_pixel());
+            log::info!("Размер блока: {:?}", head.format.block_size());
+            log::info!("Количество mip уровней: {}", head.mip_sizes.len());
+            // Сохраняем данные после deswizzle в файл
+            let mut file = File::create("after_deswizzle.bin")?;
+            file.write_all(&result)?;
+
+            result
+        };
+
+        // Вычисляем ожидаемый размер для swizzle
+        //let expected_size = tegra_swizzle::surface::swizzled_surface_size(
+        //    head.width as usize,
+        //    head.height as usize,
+        //    if head.kind == ETextureType::D3 { head.layers as usize } else { 1 },
+        //    BlockDim {
+        //        width: NonZeroUsize::new(head.format.block_size().0 as usize).unwrap(),
+        //        height: NonZeroUsize::new(head.format.block_size().1 as usize).unwrap(),
+        //        depth: NonZeroUsize::new(head.format.block_size().2 as usize).unwrap(),
+        //    },
+        //    None,
+        //    head.format.bytes_per_pixel() as usize,
+        //    head.mip_sizes.len(),
+        //    if head.kind == ETextureType::D3 { 1 } else { head.layers as usize },
+        //);
+
+        //let padded_deswizzled = if deswizzled.len() < expected_size {
+        //    log::info!("Дополняем данные нулями до ожидаемого размера {} байт", expected_size);
+        //    let mut padded = deswizzled.clone();
+        //    padded.resize(expected_size, 0);
+        //    padded
+        //} else {
+        //    deswizzled.clone()
+        //};
+//
+        //let _swizzled = {
+        //    log::info!("До swizzle (первые 256 байт):");
+        //    for (i, chunk) in padded_deswizzled.iter().take(256).collect::<Vec<_>>().chunks(16).enumerate() {
+        //        log::info!("{:03X}: {:02X?}", i * 16, chunk);
+        //    }
+        //    
+        //    // Сохраняем данные перед swizzle в файл
+        //    let mut file = File::create("before_swizzle.bin")?;
+        //    file.write_all(&padded_deswizzled)?;
+//
+        //    let result = swizzle(&head, &padded_deswizzled)?;
+        //    
+        //    log::info!("После swizzle (первые 256 байт):");
+        //    for (i, chunk) in result.iter().take(256).collect::<Vec<_>>().chunks(16).enumerate() {
+        //        log::info!("{:03X}: {:02X?}", i * 16, chunk);
+        //    }
+        //    
+        //    // Сохраняем данные после swizzle в файл
+        //    let mut file = File::create("after_swizzle.bin")?;
+        //    file.write_all(&result)?;
+//
+        //    result
+        //};
         Ok(Self { head, data: deswizzled, _marker: PhantomData })
     }
 }

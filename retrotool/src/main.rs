@@ -18,6 +18,7 @@ pub enum SubCommand {
     Fmv0(cmd::fmv0::Args),
     Pak(cmd::pak::Args),
     Txtr(cmd::txtr::Args),
+    Swizzle(cmd::swizzle::Args),
 }
 
 fn main() {
@@ -34,6 +35,7 @@ fn main() {
         SubCommand::Fmv0(args) => cmd::fmv0::run(args),
         SubCommand::Pak(args) => cmd::pak::run(args),
         SubCommand::Txtr(args) => cmd::txtr::run(args),
+        SubCommand::Swizzle(args) => cmd::swizzle::run(args),
     };
     if let Err(e) = result {
         eprintln!("Failed: {e:?}");

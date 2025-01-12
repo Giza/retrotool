@@ -40,6 +40,10 @@ $ retrotool txtr convert [in].TXTR
 $ retrotool txtr convert --astc [in].TXTR
 # writes to [in].astc
 ```
+Converts a `.dds` file to swizzled file
+```shell
+$ retrotool swizzle -i [in].dds -o [out].bin -m [mip_size]
+```
 
 ### fmv0 extract
 
